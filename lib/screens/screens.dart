@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:mindcare/main.dart';
 import 'package:mindcare/models/models.dart';
 import 'package:mindcare/services/services.dart';
+import 'package:mindcare/widgets/widgets.dart';
 
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({required this.onStart, super.key});
