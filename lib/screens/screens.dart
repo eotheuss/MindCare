@@ -5,12 +5,20 @@ import 'package:flutter/material.dart';
 import 'package:mindcare/main.dart';
 import 'package:mindcare/models/models.dart';
 import 'package:mindcare/services/services.dart';
+import 'package:mindcare/widgets/map.dart';
 import 'package:mindcare/widgets/widgets.dart';
 
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({required this.onStart, super.key});
 
   final VoidCallback onStart;
+
+  void goToMap(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const MapPage()),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -36,6 +44,12 @@ class WelcomeScreen extends StatelessWidget {
                 text: 'Começar',
                 icon: Icons.arrow_forward,
                 onPressed: onStart,
+              ),
+              const SizedBox(height: 16),
+              PrimaryButton(
+                text: 'Localização da Clínica',
+                icon: Icons.arrow_forward,
+                onPressed: () => goToMap(context),
               ),
               const Spacer(flex: 2),
             ],
@@ -905,7 +919,11 @@ class _AppointmentConfirmScreenState extends State<AppointmentConfirmScreen> {
 
     FirebaseMessaging.onMessage.listen((message) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${message.notification?.title}: ${message.notification?.body}')),
+        SnackBar(
+          content: Text(
+            '${message.notification?.title}: ${message.notification?.body}',
+          ),
+        ),
       );
     });
   }
