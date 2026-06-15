@@ -1,7 +1,68 @@
-import 'package:flutter/material.dart';
+import 'dart:developer' as developer;
 
-void main() {
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  final FirebaseMessaging messaging = FirebaseMessaging.instance;
+
+  await FirebaseMessaging.instance.setAutoInitEnabled(true);
+
+  await messaging.requestPermission(alert: true, badge: true, sound: true);
+
+  final notificationService = NotificationService();
+
+  await notificationService.init();
+
   runApp(const MindCareApp());
+}
+
+final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
+
+Future<void> registerToken(String email) async {
+  String? token = await FirebaseMessaging.instance.getToken();
+
+  ApiService apiService = ApiService();
+
+  await apiService.salvarToken(email, token);
+}
+
+class NotificationService {
+  final FlutterLocalNotificationsPlugin plugin =
+      FlutterLocalNotificationsPlugin();
+
+  Future<void> init() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+
+    const settings = InitializationSettings(android: android);
+
+    await plugin.initialize(settings: settings);
+
+    setupFCM();
+  }
+
+  void setupFCM() {
+    FirebaseMessaging.onMessage.listen((message) {
+      final notification = message.notification;
+
+      if (notification != null) {
+        scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text('${notification.title}: ${notification.body}')),
+        );
+      }
+    });
+  }
 }
 
 enum AppScreen {
@@ -26,6 +87,7 @@ class MindCareApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      scaffoldMessengerKey: scaffoldMessengerKey,
       title: 'MindCare Diary',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -110,12 +172,14 @@ class _MindCareFlowState extends State<MindCareFlow> {
         onLogin: enterApp,
       ),
       AppScreen.patientHome => PatientHomeScreen(
+        email: 'Maria Silva',
         onDiary: () => patientNav(1),
         onSchedule: () => go(AppScreen.appointment),
         onLogout: () => go(AppScreen.role),
         onNav: patientNav,
       ),
       AppScreen.patientDiary => PatientDiaryScreen(
+        email: 'Maria Silva',
         onBack: () => patientNav(0),
         onLogout: () => go(AppScreen.role),
         onNav: patientNav,
@@ -124,17 +188,23 @@ class _MindCareFlowState extends State<MindCareFlow> {
         onBack: () => patientNav(0),
         onLogout: () => go(AppScreen.role),
         onNav: patientNav,
+        email: 'Maria Silva',
       ),
       AppScreen.appointment => AppointmentScreen(
         onBack: () => patientNav(0),
         onLogout: () => go(AppScreen.role),
         onConfirm: () => go(AppScreen.appointmentConfirm),
         onNav: patientNav,
+        email: 'Maria Silva',
       ),
       AppScreen.appointmentConfirm => AppointmentConfirmScreen(
         onBack: () => go(AppScreen.appointment),
         onLogout: () => go(AppScreen.role),
         onNav: patientNav,
+        email: 'Maria Silva',
+        selectedDate: DateTime.now(),
+        professional: null,
+        type: '',
       ),
       AppScreen.professionalHome => ProfessionalHomeScreen(
         onLogout: () => go(AppScreen.role),
@@ -323,6 +393,14 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   bool hidePassword = true;
 
+  final TextEditingController emailController = TextEditingController();
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
@@ -343,6 +421,7 @@ class _LoginScreenState extends State<LoginScreen> {
               const FieldLabel('Email'),
               const SizedBox(height: 8),
               TextField(
+                controller: emailController,
                 decoration: appInputDecoration('name@example.com'),
                 keyboardType: TextInputType.emailAddress,
               ),
@@ -364,7 +443,23 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ),
               const SizedBox(height: 26),
-              PrimaryButton(text: 'Entrar', onPressed: widget.onLogin),
+              PrimaryButton(
+                text: 'Entrar',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => PatientHomeScreen(
+                        email: emailController.text,
+                        onDiary: () {},
+                        onSchedule: () {},
+                        onLogout: () {},
+                        onNav: (int value) {},
+                      ),
+                    ),
+                  );
+                },
+              ),
               const SizedBox(height: 8),
               const Center(child: Text('ou', style: TextStyle(fontSize: 12))),
               const SizedBox(height: 8),
@@ -410,14 +505,434 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-class PatientHomeScreen extends StatelessWidget {
-  const PatientHomeScreen({
+class RecomendacaoHorario {
+  final int score;
+  final String especialidade;
+  final String dataHoraConsulta;
+
+  RecomendacaoHorario({
+    required this.score,
+    required this.especialidade,
+    required this.dataHoraConsulta,
+  });
+
+  factory RecomendacaoHorario.fromJson(Map<String, dynamic> json) {
+    return RecomendacaoHorario(
+      score: json['score'],
+      especialidade: json['especialidade'],
+      dataHoraConsulta: json['dataHoraConsulta'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'score': score,
+      'especialidade': especialidade,
+      'dataHoraConsulta': dataHoraConsulta,
+    };
+  }
+}
+
+class RelatorioSemanal {
+  final Paciente? paciente;
+  final String faixaDeDatas;
+  final String relatorioIA;
+  final String observacoes;
+  final String recomendacoes;
+  final List<RegistroDiario> registrosDiarios;
+  final String dataHoraCriacao;
+  final int totalPositivos;
+  final int totalNegativos;
+  final String resumo;
+
+  RelatorioSemanal({
+    required this.paciente,
+    required this.faixaDeDatas,
+    required this.relatorioIA,
+    required this.observacoes,
+    required this.recomendacoes,
+    required this.registrosDiarios,
+    required this.dataHoraCriacao,
+    required this.totalPositivos,
+    required this.totalNegativos,
+    required this.resumo,
+  });
+
+  factory RelatorioSemanal.fromJson(Map<String, dynamic> json) {
+    return RelatorioSemanal(
+      paciente: json['paciente'] != null
+          ? Paciente.fromJson(json['paciente'])
+          : null,
+      faixaDeDatas: json['faixaDeDatas'],
+      relatorioIA: json['relatorioIA'],
+      observacoes: json['observacoes'] ?? '',
+      recomendacoes: json['recomendacoes'] ?? '',
+      registrosDiarios: (json['registrosDiarios'] as List<dynamic>)
+          .map((e) => RegistroDiario.fromJson(e))
+          .toList(),
+      dataHoraCriacao: json['dataHoraCriacao'],
+      totalPositivos: json['totalPositivos'],
+      totalNegativos: json['totalNegativos'],
+      resumo: json['resumo'] ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'paciente': paciente?.toJson(),
+      'faixaDeDatas': faixaDeDatas,
+      'relatorioIA': relatorioIA,
+      'observacoes': observacoes,
+      'recomendacoes': recomendacoes,
+      'registrosDiarios': registrosDiarios.map((r) => r.toJson()).toList(),
+      'dataHoraCriacao': dataHoraCriacao,
+      'totalPositivos': totalPositivos,
+      'totalNegativos': totalNegativos,
+      'resumo': resumo,
+    };
+  }
+}
+
+class Consulta {
+  final Profissional? profissional;
+  final Paciente? paciente;
+  final bool atendida;
+  final bool cancelada;
+  String? dataHoraConsulta;
+
+  Consulta({
+    required this.profissional,
+    required this.paciente,
+    required this.atendida,
+    required this.cancelada,
+    required this.dataHoraConsulta,
+  });
+
+  factory Consulta.fromJson(Map<String, dynamic> json) {
+    return Consulta(
+      profissional: json['profissional'] != null
+          ? Profissional.fromJson(json['profissional'])
+          : null,
+      paciente: json['paciente'] != null
+          ? Paciente.fromJson(json['paciente'])
+          : null,
+      atendida: json['atendida'],
+      cancelada: json['cancelada'],
+      dataHoraConsulta: json['dataHoraConsulta'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'profissional': profissional?.toJson(),
+      'paciente': paciente?.toJson(),
+      'atendida': atendida,
+      'cancelada': cancelada,
+      'dataHoraConsulta': dataHoraConsulta,
+    };
+  }
+}
+
+class Paciente {
+  final String nomeUsuario;
+  final String senha;
+  final String nomeCompleto;
+  final String dataNascimento;
+  final String dataHoraAtivacao;
+  final bool ativo;
+  final String estadoPaciente;
+  final Profissional? profissional;
+  final List<Consulta> consultas;
+
+  Paciente({
+    required this.nomeUsuario,
+    required this.senha,
+    required this.nomeCompleto,
+    required this.dataNascimento,
+    required this.dataHoraAtivacao,
+    required this.ativo,
+    required this.estadoPaciente,
+    required this.profissional,
+    required this.consultas,
+  });
+
+  factory Paciente.fromJson(Map<String, dynamic> json) {
+    return Paciente(
+      nomeUsuario: json['nomeUsuario'],
+      senha: json['senha'],
+      nomeCompleto: json['nomeCompleto'],
+      dataNascimento: json['dataNascimento'],
+      dataHoraAtivacao: json['dataHoraAtivacao'],
+      ativo: json['ativo'],
+      estadoPaciente: json['estadoPaciente'],
+      profissional: json['profissional'] != null
+          ? Profissional.fromJson(json['profissional'])
+          : null,
+      consultas: (json['consultas'] as List<dynamic>)
+          .map((e) => Consulta.fromJson(e))
+          .toList(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'nomeUsuario': nomeUsuario,
+      'senha': senha,
+      'nomeCompleto': nomeCompleto,
+      'dataNascimento': dataNascimento,
+      'dataHoraAtivacao': dataHoraAtivacao,
+      'ativo': ativo,
+      'estadoPaciente': estadoPaciente,
+      'profissional': profissional?.toJson(),
+      'consultas': consultas.map((c) => c.toJson()).toList(),
+    };
+  }
+}
+
+class Profissional {
+  Profissional({
+    required this.nomeUsuario,
+    required this.senha,
+    required this.nomeCompleto,
+    required this.dataNascimento,
+    required this.dataHoraAtivacao,
+    required this.ativo,
+    required this.tipoProfissional,
+    required this.consultas,
+  });
+
+  final String nomeUsuario;
+  final String senha;
+  final String nomeCompleto;
+  final String dataNascimento;
+  final String dataHoraAtivacao;
+  final bool ativo;
+  final String tipoProfissional;
+  final List<Consulta> consultas;
+
+  factory Profissional.fromJson(Map<String, dynamic> json) {
+    return Profissional(
+      nomeUsuario: json['nomeUsuario'],
+      senha: json['senha'],
+      nomeCompleto: json['nomeCompleto'],
+      dataNascimento: json['dataNascimento'],
+      dataHoraAtivacao: json['dataHoraAtivacao'],
+      ativo: json['ativo'],
+      tipoProfissional: json['tipoProfissional'],
+      consultas: json['consultas'] != null
+          ? (json['consultas'] as List<dynamic>)
+                .map((e) => Consulta.fromJson(e))
+                .toList()
+          : [],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'nomeUsuario': nomeUsuario,
+      'senha': senha,
+      'nomeCompleto': nomeCompleto,
+      'dataNascimento': dataNascimento,
+      'dataHoraAtivacao': dataHoraAtivacao,
+      'ativo': ativo,
+      'tipoProfissional': tipoProfissional,
+      'consultas': consultas.map((c) => c.toJson()).toList(),
+    };
+  }
+}
+
+class RegistroDiario {
+  final Paciente? paciente;
+  final String nivelHumor;
+  final String pontosPositivos;
+  final String dificuldadesDesafios;
+  final String dataHoraCriacao;
+
+  RegistroDiario({
+    required this.paciente,
+    required this.nivelHumor,
+    required this.pontosPositivos,
+    required this.dificuldadesDesafios,
+    required this.dataHoraCriacao,
+  });
+
+  factory RegistroDiario.fromJson(Map<String, dynamic> json) {
+    return RegistroDiario(
+      paciente: json['paciente'] != null
+          ? Paciente.fromJson(json['paciente'])
+          : null,
+      nivelHumor: json['nivelHumor'],
+      pontosPositivos: json['pontosPositivos'],
+      dificuldadesDesafios: json['dificuldadesDesafios'],
+      dataHoraCriacao: json['dataHoraCriacao'],
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'paciente': paciente?.toJson(),
+      'nivelHumor': nivelHumor,
+      'pontosPositivos': pontosPositivos,
+      'dificuldadesDesafios': dificuldadesDesafios,
+      'dataHoraCriacao': dataHoraCriacao,
+    };
+  }
+}
+
+class ApiService {
+  Future<List<RegistroDiario>> carregarRegistrosDiarios(
+    String nomeUsuario,
+  ) async {
+    final response = await http.get(
+      Uri.parse('http://localhost:8080/registrosDiarios/$nomeUsuario'),
+    );
+
+    if (response.statusCode == 200) {
+      final List<dynamic> jsonList = jsonDecode(response.body);
+
+      return jsonList.map((json) => RegistroDiario.fromJson(json)).toList();
+    }
+
+    throw Exception(
+      'Falha ao carregar os registros diários do usuário $nomeUsuario',
+    );
+  }
+
+  Future<List<RelatorioSemanal>> carregarRelatoriosSemanais(
+    String nomeUsuario,
+  ) async {
+    final response = await http.get(
+      Uri.parse('http://localhost:8080/relatoriosSemanais/$nomeUsuario'),
+    );
+
+    if (response.statusCode == 200) {
+      final List<dynamic> jsonList = jsonDecode(response.body);
+
+      return jsonList.map((json) => RelatorioSemanal.fromJson(json)).toList();
+    }
+
+    throw Exception(
+      'Falha ao carregar os relatórios semanais do usuário $nomeUsuario',
+    );
+  }
+
+  Future salvarRegistroDiario(
+    RegistroDiario registro,
+    String nomeUsuario,
+  ) async {
+    final response = await http.post(
+      Uri.parse(
+        'http://localhost:8080/registrosDiarios/cadastrarRegistroDiario/$nomeUsuario',
+      ),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(registro.toJson()),
+    );
+
+    if (response.statusCode == 200) {
+      developer.log(
+        'Registro diário salvo com sucesso para o usuário $nomeUsuario',
+      );
+    } else {
+      throw Exception(
+        'Falha ao salvar registro diário do usuário $nomeUsuario',
+      );
+    }
+  }
+
+  Future<List<Profissional>> carregarProfissionais(
+    String tipoProfissional,
+  ) async {
+    final response = await http.get(
+      Uri.parse(
+        'http://localhost:8080/profissionais/tipoProfissional/$tipoProfissional',
+      ),
+    );
+
+    if (response.statusCode == 200) {
+      final List<dynamic> jsonList = jsonDecode(response.body);
+
+      return jsonList.map((json) => Profissional.fromJson(json)).toList();
+    }
+
+    throw Exception(
+      'Falha ao carregar os profissionais do tipo $tipoProfissional',
+    );
+  }
+
+  Future<List<RecomendacaoHorario>> carregarHorariosDisponiveis(
+    String dataInformada,
+    String nomeUsuario,
+  ) async {
+    final response = await http.get(
+      Uri.parse(
+        'http://localhost:8080/agendamentos/recomendarHorarios/$dataInformada/profissional/$nomeUsuario',
+      ),
+    );
+
+    if (response.statusCode == 200) {
+      final List<dynamic> jsonList = jsonDecode(response.body);
+
+      return jsonList
+          .map((json) => RecomendacaoHorario.fromJson(json))
+          .toList();
+    }
+
+    throw Exception(
+      'Falha ao carregar os horários disponíveis para a data $dataInformada e profissional $nomeUsuario',
+    );
+  }
+
+  Future salvarAgendamento(Consulta? consulta) async {
+    final response = await http.post(
+      Uri.parse('http://localhost:8080/agendamentos'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(consulta?.toJson()),
+    );
+
+    if (response.statusCode == 200) {
+      developer.log('Agendamento salvo com sucesso');
+    } else {
+      throw Exception('Falha ao salvar agendamento');
+    }
+  }
+
+  Future<Paciente> carregarPaciente(String nomeUsuario) async {
+    final response = await http.get(
+      Uri.parse('http://localhost:8080/pacientes/$nomeUsuario'),
+    );
+
+    if (response.statusCode == 200) {
+      developer.log('Paciente carregado com sucesso');
+      return Paciente.fromJson(jsonDecode(response.body));
+    }
+    throw Exception('Falha ao carregar paciente');
+  }
+
+  Future<void> salvarToken(String email, String? token) async {
+    final response = await http.post(
+      Uri.parse('http://localhost:8080/usuarios/token/$email?token=$token'),
+      headers: {'Content-Type': 'application/json'},
+    );
+
+    if (response.statusCode == 200) {
+      developer.log('Token salvo com sucesso');
+    } else {
+      throw Exception('Falha ao salvar token');
+    }
+  }
+}
+
+class PatientHomeScreen extends StatefulWidget {
+  PatientHomeScreen({
     required this.onDiary,
     required this.onSchedule,
     required this.onLogout,
     required this.onNav,
+    required this.email,
     super.key,
   });
+
+  final String email;
 
   final VoidCallback onDiary;
   final VoidCallback onSchedule;
@@ -425,17 +940,57 @@ class PatientHomeScreen extends StatelessWidget {
   final ValueChanged<int> onNav;
 
   @override
+  State<PatientHomeScreen> createState() => _PatientHomeScreenState();
+}
+
+class _PatientHomeScreenState extends State<PatientHomeScreen> {
+  final ApiService service = ApiService();
+
+  String converteParaEmoji(String nivelHumor) {
+    switch (nivelHumor) {
+      case 'OTIMO':
+        return '😄';
+      case 'BOM':
+        return '🙂';
+      case 'NEUTRO':
+        return '😐';
+      case 'MAL':
+        return '☹️';
+      case 'PESSIMO':
+        return '😭';
+      default:
+        return '-';
+    }
+  }
+
+  Future<void> loginUser() async {
+    String? token = await FirebaseMessaging.instance.getToken();
+
+    await service.salvarToken(widget.email, token);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    loginUser();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      bottomNavigationBar: MindBottomNav(selectedIndex: 0, onTap: onNav),
+      bottomNavigationBar: MindBottomNav(
+        selectedIndex: 0,
+        onTap: widget.onNav,
+        email: widget.email,
+      ),
       child: Column(
         children: [
           AppHeader(
             color: AppColors.patientHeader,
             avatarEmoji: '👩',
-            onLogout: onLogout,
-            child: const Text(
-              'Olá Maria,\ncomo você está se sentindo hoje?',
+            onLogout: widget.onLogout,
+            child: Text(
+              'Olá ${widget.email},\ncomo você está se sentindo hoje?',
               style: TextStyle(
                 color: AppColors.navy,
                 fontWeight: FontWeight.w800,
@@ -447,12 +1002,44 @@ class PatientHomeScreen extends StatelessWidget {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(18, 12, 18, 18),
               children: [
-                PrimaryButton(text: '+ Escrever no Diário', onPressed: onDiary),
+                PrimaryButton(
+                  text: '+ Escrever no Diário',
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => PatientDiaryScreen(
+                          onBack: () {
+                            Navigator.pop(context);
+                          },
+                          onLogout: widget.onLogout,
+                          onNav: widget.onNav,
+                          email: widget.email,
+                        ),
+                      ),
+                    );
+                  },
+                ),
                 const SizedBox(height: 12),
                 PrimaryButton(
                   text: 'Agendar Consulta',
                   color: AppColors.purple,
-                  onPressed: onSchedule,
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => AppointmentScreen(
+                          onBack: () {
+                            Navigator.pop(context);
+                          },
+                          onLogout: widget.onLogout,
+                          onConfirm: () {},
+                          onNav: widget.onNav,
+                          email: widget.email,
+                        ),
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: 16),
                 const SectionTitle(
@@ -460,30 +1047,34 @@ class PatientHomeScreen extends StatelessWidget {
                   text: 'Recentes',
                 ),
                 const SizedBox(height: 8),
-                const DiaryPreview(
-                  emoji: '🙂',
-                  title: 'Quarta-feira, 8 de Abril',
-                  subtitle: 'Diário Completo',
-                ),
-                const DiaryPreview(
-                  emoji: '😄',
-                  title: 'Terça-feira, 7 de Abril',
-                  subtitle: 'Diário Completo',
-                ),
-                const DiaryPreview(
-                  emoji: '😐',
-                  title: 'Segunda-feira, 6 de Abril',
-                  subtitle: 'Diário Completo',
-                ),
-                const DiaryPreview(
-                  emoji: '😭',
-                  title: 'Sábado, 4 de Abril',
-                  subtitle: 'Diário Completo',
-                ),
-                const DiaryPreview(
-                  emoji: '🙁',
-                  title: 'Sexta-feira, 3 de Abril',
-                  subtitle: 'Diário Completo',
+                FutureBuilder<List<RegistroDiario>>(
+                  future: service.carregarRegistrosDiarios(widget.email),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+
+                    if (snapshot.hasError) {
+                      return Text('Error: ${snapshot.error}');
+                    }
+
+                    final diaries = snapshot.data ?? [];
+
+                    return ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: diaries.length,
+                      itemBuilder: (context, index) {
+                        final diary = diaries[index];
+                        developer.log(diary.nivelHumor);
+                        return DiaryPreview(
+                          emoji: converteParaEmoji(diary.nivelHumor),
+                          title: diary.dataHoraCriacao.substring(0, 10),
+                          subtitle: 'Diário Completo',
+                        );
+                      },
+                    );
+                  },
                 ),
               ],
             ),
@@ -494,30 +1085,37 @@ class PatientHomeScreen extends StatelessWidget {
   }
 }
 
-class PatientDiaryScreen extends StatelessWidget {
-  const PatientDiaryScreen({
-    required this.onBack,
-    required this.onLogout,
-    required this.onNav,
-    super.key,
-  });
+class _PatientDiaryScreenState extends State<PatientDiaryScreen> {
+  final ApiService service = ApiService();
 
-  final VoidCallback onBack;
-  final VoidCallback onLogout;
-  final ValueChanged<int> onNav;
+  final positivosController = TextEditingController();
+  final desafiosController = TextEditingController();
+
+  @override
+  void dispose() {
+    positivosController.dispose();
+    desafiosController.dispose();
+    super.dispose();
+  }
+
+  String nivelHumor = '';
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      bottomNavigationBar: MindBottomNav(selectedIndex: 1, onTap: onNav),
+      bottomNavigationBar: MindBottomNav(
+        selectedIndex: 1,
+        onTap: widget.onNav,
+        email: widget.email,
+      ),
       child: Column(
         children: [
           AppHeader(
             title: 'Meu Diário',
             color: AppColors.patientHeader,
             avatarEmoji: '👩',
-            onBack: onBack,
-            onLogout: onLogout,
+            onBack: widget.onBack,
+            onLogout: widget.onLogout,
           ),
           Expanded(
             child: ListView(
@@ -537,41 +1135,89 @@ class PatientDiaryScreen extends StatelessWidget {
                       const SizedBox(height: 18),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: const [
-                          MoodItem(emoji: '😁', label: 'Ótimo'),
-                          MoodItem(emoji: '🙂', label: 'Bem'),
-                          MoodItem(emoji: '😐', label: 'Neutro'),
-                          MoodItem(emoji: '🙁', label: 'Mal'),
-                          MoodItem(emoji: '😭', label: 'Péssimo'),
+                        children: [
+                          MoodItem(
+                            emoji: '😁',
+                            label: 'OTIMO',
+                            onTap: () {
+                              setState(() {
+                                nivelHumor = 'OTIMO';
+                              });
+                            },
+                          ),
+                          MoodItem(
+                            emoji: '🙂',
+                            label: 'BOM',
+                            onTap: () {
+                              setState(() {
+                                nivelHumor = 'BOM';
+                              });
+                            },
+                          ),
+                          MoodItem(
+                            emoji: '😐',
+                            label: 'NEUTRO',
+                            onTap: () {
+                              setState(() {
+                                nivelHumor = 'NEUTRO';
+                              });
+                            },
+                          ),
+                          MoodItem(
+                            emoji: '🙁',
+                            label: 'MAL',
+                            onTap: () {
+                              setState(() {
+                                nivelHumor = 'MAL';
+                              });
+                            },
+                          ),
+                          MoodItem(
+                            emoji: '😭',
+                            label: 'PESSIMO',
+                            onTap: () {
+                              setState(() {
+                                nivelHumor = 'PESSIMO';
+                              });
+                            },
+                          ),
                         ],
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 18),
-                const JournalBox(
+                JournalBox(
                   icon: Icons.add_circle_outline,
                   title: 'Pontos Positivos do Dia',
                   titleColor: AppColors.green,
                   hint:
                       'O que aconteceu de bom hoje? Quais momentos te deixaram feliz?',
+                  controller: positivosController,
                 ),
                 const SizedBox(height: 18),
-                const JournalBox(
+                JournalBox(
                   icon: Icons.sentiment_dissatisfied,
                   title: 'Dificuldades e Desafios',
                   titleColor: AppColors.red,
                   hint: 'O que te incomodou hoje? Houve algum momento difícil?',
+                  controller: desafiosController,
                 ),
-                const SizedBox(height: 22),
+                const SizedBox(height: 18),
                 PrimaryButton(
                   text: 'Salvar Diário',
                   icon: Icons.save_outlined,
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Diário salvo com sucesso!'),
-                      ),
+                  onPressed: () async {
+                    final registroDiario = RegistroDiario(
+                      paciente: null,
+                      nivelHumor: nivelHumor,
+                      pontosPositivos: positivosController.text,
+                      dificuldadesDesafios: desafiosController.text,
+                      dataHoraCriacao: DateTime.now().toIso8601String(),
+                    );
+                    await service.salvarRegistroDiario(
+                      registroDiario,
+                      widget.email,
                     );
                   },
                 ),
@@ -584,49 +1230,114 @@ class PatientDiaryScreen extends StatelessWidget {
   }
 }
 
-class PatientReportScreen extends StatelessWidget {
-  const PatientReportScreen({
+class PatientDiaryScreen extends StatefulWidget {
+  const PatientDiaryScreen({
     required this.onBack,
     required this.onLogout,
     required this.onNav,
+    required this.email,
     super.key,
   });
 
   final VoidCallback onBack;
   final VoidCallback onLogout;
   final ValueChanged<int> onNav;
+  final String email;
+
+  @override
+  State<PatientDiaryScreen> createState() => _PatientDiaryScreenState();
+}
+
+class PatientReportScreen extends StatefulWidget {
+  PatientReportScreen({
+    required this.onBack,
+    required this.onLogout,
+    required this.onNav,
+    required this.email,
+    super.key,
+  });
+
+  final VoidCallback onBack;
+  final VoidCallback onLogout;
+  final ValueChanged<int> onNav;
+  final String email;
+
+  @override
+  State<PatientReportScreen> createState() => _PatientReportScreenState();
+}
+
+class _PatientReportScreenState extends State<PatientReportScreen> {
+  final ApiService service = ApiService();
+
+  late Future<List<RelatorioSemanal>> relatoriosFuture;
+
+  @override
+  void initState() {
+    super.initState();
+
+    relatoriosFuture = service.carregarRelatoriosSemanais(widget.email);
+  }
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      bottomNavigationBar: MindBottomNav(selectedIndex: 2, onTap: onNav),
+      bottomNavigationBar: MindBottomNav(
+        selectedIndex: 2,
+        onTap: widget.onNav,
+        email: widget.email,
+      ),
       child: Column(
         children: [
           AppHeader(
             title: 'Relatórios Semanais',
             color: AppColors.patientHeader,
             avatarEmoji: '👩',
-            onBack: onBack,
-            onLogout: onLogout,
+            onBack: widget.onBack,
+            onLogout: widget.onLogout,
           ),
+          const SizedBox(height: 16),
           Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(18),
-              children: const [
-                PatientReportCard(
-                  week: '03/04/2026 - 09/04/2026',
-                  summary: 'Semana com bom equilíbrio emocional',
-                  positives: '4',
-                  challenges: '2',
-                ),
-                SizedBox(height: 18),
-                PatientReportCard(
-                  week: '27/03/2026 - 02/04/2026',
-                  summary: 'Semana com alguns desafios.',
-                  positives: '3',
-                  challenges: '3',
-                ),
-              ],
+            child: FutureBuilder<List<RelatorioSemanal>>(
+              future: relatoriosFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                if (snapshot.hasError) {
+                  return Center(child: Text('Erro: ${snapshot.error}'));
+                }
+
+                final relatorios = snapshot.data ?? [];
+
+                if (relatorios.isEmpty) {
+                  return const Center(
+                    child: Text('Nenhum relatório encontrado'),
+                  );
+                }
+
+                return ListView.separated(
+                  padding: const EdgeInsets.all(18),
+                  itemCount: relatorios.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 18),
+                  itemBuilder: (context, index) {
+                    final relatorio = relatorios[index];
+                    final faixaDeDatas = relatorio.faixaDeDatas.replaceFirst(
+                      '^',
+                      ' :: ',
+                    );
+
+                    return PatientReportCard(
+                      week: faixaDeDatas,
+                      summary: relatorio.resumo,
+                      positives: relatorio.totalPositivos.toString(),
+                      challenges: relatorio.totalNegativos.toString(),
+                      observacoes: relatorio.observacoes,
+                      recomendacoes: relatorio.recomendacoes,
+                    );
+                  },
+                );
+              },
             ),
           ),
         ],
@@ -641,6 +1352,7 @@ class AppointmentScreen extends StatefulWidget {
     required this.onLogout,
     required this.onConfirm,
     required this.onNav,
+    required this.email,
     super.key,
   });
 
@@ -648,6 +1360,7 @@ class AppointmentScreen extends StatefulWidget {
   final VoidCallback onLogout;
   final VoidCallback onConfirm;
   final ValueChanged<int> onNav;
+  final String email;
 
   @override
   State<AppointmentScreen> createState() => _AppointmentScreenState();
@@ -655,12 +1368,51 @@ class AppointmentScreen extends StatefulWidget {
 
 class _AppointmentScreenState extends State<AppointmentScreen> {
   String type = 'Psiquiatra';
-  String professional = 'Erica Okamura';
+  Profissional? profissional = null;
+
+  ApiService service = ApiService();
+
+  List<Profissional> professionals = [];
+
+  Future<void> carregarProfissionais() async {
+    final result = await service.carregarProfissionais(type);
+
+    setState(() {
+      professionals = result;
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    carregarProfissionais();
+  }
+
+  DateTime? selectedDate;
+
+  Future<void> selecionarData() async {
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+
+    if (picked != null) {
+      setState(() {
+        selectedDate = picked;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      bottomNavigationBar: MindBottomNav(selectedIndex: 0, onTap: widget.onNav),
+      bottomNavigationBar: MindBottomNav(
+        selectedIndex: 0,
+        onTap: widget.onNav,
+        email: widget.email,
+      ),
       child: Column(
         children: [
           AppHeader(
@@ -681,14 +1433,28 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                     children: [
                       SelectOption(
                         text: 'Psicólogo',
-                        selected: type == 'Psicólogo',
-                        onTap: () => setState(() => type = 'Psicólogo'),
+                        selected: type == 'PSICOLOGO',
+                        onTap: () async {
+                          setState(() {
+                            type = 'PSICOLOGO';
+                            profissional = null;
+                          });
+
+                          await carregarProfissionais();
+                        },
                       ),
                       const SizedBox(height: 10),
                       SelectOption(
                         text: 'Psiquiatra',
-                        selected: type == 'Psiquiatra',
-                        onTap: () => setState(() => type = 'Psiquiatra'),
+                        selected: type == 'PSIQUIATRA',
+                        onTap: () async {
+                          setState(() {
+                            type = 'PSIQUIATRA';
+                            profissional = null;
+                          });
+
+                          await carregarProfissionais();
+                        },
                       ),
                     ],
                   ),
@@ -697,22 +1463,20 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                 const FieldLabel('Selecione o profissional'),
                 const SizedBox(height: 8),
                 AppCard(
-                  child: DropdownButtonFormField<String>(
-                    initialValue: professional,
+                  child: DropdownButtonFormField<Profissional>(
+                    initialValue: null,
                     decoration: appInputDecoration('Profissional'),
-                    items: const [
-                      DropdownMenuItem(
-                        value: 'Erica Okamura',
-                        child: Text('Erica Okamura'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'Daniel Rocha',
-                        child: Text('Daniel Rocha'),
-                      ),
-                    ],
+                    items: professionals
+                        .map(
+                          (p) => DropdownMenuItem(
+                            value: p,
+                            child: Text(p.nomeCompleto),
+                          ),
+                        )
+                        .toList(),
                     onChanged: (value) {
                       if (value != null) {
-                        setState(() => professional = value);
+                        setState(() => profissional = value);
                       }
                     },
                   ),
@@ -720,9 +1484,53 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
                 const SizedBox(height: 22),
                 const FieldLabel('Selecione a Data'),
                 const SizedBox(height: 8),
-                const CalendarCard(),
+                GestureDetector(
+                  onTap: selecionarData,
+                  child: AppCard(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.calendar_month),
+                          const SizedBox(width: 12),
+                          Text(
+                            selectedDate == null
+                                ? 'Toque para selecionar uma data'
+                                : '${selectedDate!.day.toString().padLeft(2, '0')}/'
+                                      '${selectedDate!.month.toString().padLeft(2, '0')}/'
+                                      '${selectedDate!.year}',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 18),
-                PrimaryButton(text: 'Continuar', onPressed: widget.onConfirm),
+                PrimaryButton(
+                  text: 'Continuar',
+                  onPressed: () {
+                    if (selectedDate == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Selecione uma data')),
+                      );
+                      return;
+                    }
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => AppointmentConfirmScreen(
+                          onBack: () => Navigator.pop(context),
+                          onLogout: () {},
+                          onNav: (index) => {},
+                          email: widget.email,
+                          selectedDate: selectedDate!,
+                          professional: profissional,
+                          type: type,
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ],
             ),
           ),
@@ -732,60 +1540,151 @@ class _AppointmentScreenState extends State<AppointmentScreen> {
   }
 }
 
-class AppointmentConfirmScreen extends StatelessWidget {
-  const AppointmentConfirmScreen({
+class AppointmentConfirmScreen extends StatefulWidget {
+  AppointmentConfirmScreen({
     required this.onBack,
     required this.onLogout,
     required this.onNav,
+    required this.email,
+    required this.selectedDate,
+    required this.professional,
+    required this.type,
     super.key,
   });
 
   final VoidCallback onBack;
   final VoidCallback onLogout;
   final ValueChanged<int> onNav;
+  final String email;
+  final DateTime selectedDate;
+  final Profissional? professional;
+  final String type;
+
+  @override
+  State<AppointmentConfirmScreen> createState() =>
+      _AppointmentConfirmScreenState();
+}
+
+class _AppointmentConfirmScreenState extends State<AppointmentConfirmScreen> {
+  final ApiService service = ApiService();
+
+  late Future<List<RecomendacaoHorario>> horariosFuture;
+
+  Paciente? paciente;
+  Consulta? consulta;
+
+  @override
+  void initState() {
+    super.initState();
+
+    horariosFuture = service.carregarHorariosDisponiveis(
+      widget.selectedDate.toIso8601String().split('T')[0],
+      widget.professional?.nomeUsuario ?? '',
+    );
+
+    carregarPacienteEConsulta();
+  }
+
+  String? horarioSelecionado;
+
+  Future<void> carregarPacienteEConsulta() async {
+    final pacienteCarregado = await service.carregarPaciente(widget.email);
+
+    setState(() {
+      paciente = pacienteCarregado;
+
+      consulta = Consulta(
+        profissional: widget.professional,
+        paciente: pacienteCarregado,
+        atendida: false,
+        cancelada: false,
+        dataHoraConsulta: horarioSelecionado,
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return AppScaffold(
-      bottomNavigationBar: MindBottomNav(selectedIndex: 0, onTap: onNav),
+      bottomNavigationBar: MindBottomNav(
+        selectedIndex: 0,
+        onTap: widget.onNav,
+        email: widget.email,
+      ),
       child: Column(
         children: [
           AppHeader(
             title: 'Agendar Consulta',
             color: AppColors.patientHeader,
             avatarEmoji: '👩',
-            onBack: onBack,
-            onLogout: onLogout,
+            onBack: widget.onBack,
+            onLogout: widget.onLogout,
           ),
           Expanded(
             child: ListView(
               padding: const EdgeInsets.all(18),
               children: [
-                const CalendarCard(large: true),
+                Text(
+                  '${widget.selectedDate.day.toString().padLeft(2, '0')}/'
+                  '${widget.selectedDate.month.toString().padLeft(2, '0')}/'
+                  '${widget.selectedDate.year}',
+                ),
                 const SizedBox(height: 18),
                 const FieldLabel('Horários disponíveis'),
                 const SizedBox(height: 8),
                 AppCard(
-                  child: Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: const [
-                      TimeChip('08:00'),
-                      TimeChip('09:00'),
-                      TimeChip('10:00'),
-                      TimeChip('11:00'),
-                      TimeChip('14:00'),
-                      TimeChip('16:00'),
-                    ],
+                  child: FutureBuilder<List<RecomendacaoHorario>>(
+                    future: horariosFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+
+                      if (snapshot.hasError) {
+                        return Text(
+                          'Erro ao carregar horários: ${snapshot.error}',
+                        );
+                      }
+
+                      final horarios = snapshot.data ?? [];
+
+                      if (horarios.isEmpty) {
+                        return const Text('Nenhum horário disponível.');
+                      }
+
+                      return Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: horarios.map((horario) {
+                          return TimeChip(
+                            time: horario.dataHoraConsulta.substring(11, 16),
+                            selected:
+                                horarioSelecionado == horario.dataHoraConsulta,
+                            onTap: () {
+                              setState(() {
+                                horarioSelecionado = horario.dataHoraConsulta;
+                                consulta?.dataHoraConsulta =
+                                    horario.dataHoraConsulta.isEmpty
+                                    ? null
+                                    : '${horario.dataHoraConsulta.split('T')[0]}T${horario.dataHoraConsulta.substring(11, 16)}';
+                              });
+                            },
+                          );
+                        }).toList(),
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(height: 24),
                 PrimaryButton(
                   text: 'Confirmar Agendamento',
                   onPressed: () {
+                    service.salvarAgendamento(consulta);
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Consulta agendada para 09/10 às 10:00.'),
+                      SnackBar(
+                        content: Text(
+                          'Consulta agendada para $horarioSelecionado.',
+                        ),
                       ),
                     );
                   },
@@ -1375,17 +2274,64 @@ class MindBottomNav extends StatelessWidget {
   const MindBottomNav({
     required this.selectedIndex,
     required this.onTap,
+    required this.email,
     super.key,
   });
 
   final int selectedIndex;
+  final String email;
   final ValueChanged<int> onTap;
 
   @override
   Widget build(BuildContext context) {
     return NavigationBar(
       selectedIndex: selectedIndex,
-      onDestinationSelected: onTap,
+      onDestinationSelected: (index) {
+        switch (index) {
+          case 0:
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => PatientHomeScreen(
+                  onDiary: () {},
+                  onSchedule: () {},
+                  onLogout: () {},
+                  onNav: (index) => {},
+                  email: email,
+                ),
+              ),
+            );
+            break;
+
+          case 1:
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => PatientDiaryScreen(
+                  onBack: () {},
+                  onLogout: () {},
+                  onNav: (index) => {},
+                  email: email,
+                ),
+              ),
+            );
+            break;
+
+          case 2:
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => PatientReportScreen(
+                  onBack: () {},
+                  onLogout: () {},
+                  onNav: (index) => {},
+                  email: email,
+                ),
+              ),
+            );
+            break;
+        }
+      },
       backgroundColor: const Color(0xFFC7DFFF),
       indicatorColor: Colors.transparent,
       labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
@@ -1604,26 +2550,35 @@ class DiaryPreview extends StatelessWidget {
 }
 
 class MoodItem extends StatelessWidget {
-  const MoodItem({required this.emoji, required this.label, super.key});
+  const MoodItem({
+    required this.emoji,
+    required this.label,
+    required this.onTap,
+    super.key,
+  });
 
   final String emoji;
   final String label;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        MoodBadge(mood: emoji, size: 44),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(
-            color: AppColors.navy,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        children: [
+          MoodBadge(mood: emoji, size: 44),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.navy,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1664,6 +2619,7 @@ class JournalBox extends StatelessWidget {
     required this.title,
     required this.titleColor,
     required this.hint,
+    required this.controller,
     super.key,
   });
 
@@ -1671,6 +2627,7 @@ class JournalBox extends StatelessWidget {
   final String title;
   final Color titleColor;
   final String hint;
+  final TextEditingController controller;
 
   @override
   Widget build(BuildContext context) {
@@ -1694,6 +2651,7 @@ class JournalBox extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           TextField(
+            controller: controller,
             minLines: 4,
             maxLines: 5,
             decoration: appInputDecoration(hint),
@@ -1710,6 +2668,8 @@ class PatientReportCard extends StatelessWidget {
     required this.summary,
     required this.positives,
     required this.challenges,
+    required this.observacoes,
+    required this.recomendacoes,
     super.key,
   });
 
@@ -1717,6 +2677,8 @@ class PatientReportCard extends StatelessWidget {
   final String summary;
   final String positives;
   final String challenges;
+  final String observacoes;
+  final String recomendacoes;
 
   @override
   Widget build(BuildContext context) {
@@ -1773,7 +2735,7 @@ class PatientReportCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: const Color(0xFFC7B8FF)),
             ),
-            child: const Column(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
@@ -1783,18 +2745,12 @@ class PatientReportCard extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
-                SizedBox(height: 8),
-                Text(
-                  'Continue registrando suas emoções diariamente. Percebi uma evolução positiva em sua autoavaliação.',
-                  style: TextStyle(fontSize: 12),
-                ),
+                const SizedBox(height: 8),
+                Text(observacoes, style: TextStyle(fontSize: 12)),
                 SizedBox(height: 10),
                 AppCard(
                   padding: EdgeInsets.all(10),
-                  child: Text(
-                    'Recomendação:\nMantenha as práticas de meditação e exercícios físicos.',
-                    style: TextStyle(fontSize: 12),
-                  ),
+                  child: Text(recomendacoes, style: TextStyle(fontSize: 12)),
                 ),
               ],
             ),
@@ -1854,157 +2810,22 @@ class MetricBox extends StatelessWidget {
   }
 }
 
-class CalendarCard extends StatelessWidget {
-  const CalendarCard({this.large = false, super.key});
-
-  final bool large;
-
-  @override
-  Widget build(BuildContext context) {
-    final days = [
-      '28',
-      '29',
-      '30',
-      '31',
-      '1',
-      '2',
-      '3',
-      '4',
-      '5',
-      '6',
-      '7',
-      '8',
-      '9',
-      '10',
-      '11',
-      '12',
-      '13',
-      '14',
-      '15',
-      '16',
-      '17',
-      '18',
-      '19',
-      '20',
-      '21',
-      '22',
-      '23',
-      '24',
-      '25',
-      '26',
-      '27',
-      '28',
-      '29',
-      '30',
-      '31',
-    ];
-
-    return AppCard(
-      padding: EdgeInsets.all(large ? 24 : 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Outubro de 2026',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
-          ),
-          const SizedBox(height: 20),
-          GridView.count(
-            crossAxisCount: 7,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            childAspectRatio: large ? 1.25 : 1.05,
-            children: const [
-              CalendarText('S', bold: true),
-              CalendarText('T', bold: true),
-              CalendarText('Q', bold: true),
-              CalendarText('Q', bold: true),
-              CalendarText('S', bold: true),
-              CalendarText('S', bold: true),
-              CalendarText('D', bold: true),
-            ],
-          ),
-          GridView.count(
-            crossAxisCount: 7,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            childAspectRatio: large ? 1.25 : 1.05,
-            children: days
-                .map(
-                  (day) => CalendarText(
-                    day,
-                    faded:
-                        ['28', '29', '30', '31'].contains(day) &&
-                        days.indexOf(day) < 4,
-                    selected: day == '9',
-                  ),
-                )
-                .toList(),
-          ),
-          if (large) ...[
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: const [
-                Icon(Icons.chevron_left, color: Colors.black26),
-                Icon(Icons.chevron_right, color: Colors.black26),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class CalendarText extends StatelessWidget {
-  const CalendarText(
-    this.text, {
-    this.bold = false,
-    this.faded = false,
-    this.selected = false,
+class TimeChip extends StatelessWidget {
+  TimeChip({
+    required this.time,
+    required this.selected,
+    required this.onTap,
     super.key,
   });
 
-  final String text;
-  final bool bold;
-  final bool faded;
-  final bool selected;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Container(
-        width: 38,
-        height: 38,
-        alignment: Alignment.center,
-        decoration: selected
-            ? const BoxDecoration(
-                color: Color(0xFFD7CBFF),
-                shape: BoxShape.circle,
-              )
-            : null,
-        child: Text(
-          text,
-          style: TextStyle(
-            color: faded ? Colors.black26 : Colors.black87,
-            fontWeight: bold || selected ? FontWeight.w900 : FontWeight.w700,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class TimeChip extends StatelessWidget {
-  const TimeChip(this.time, {super.key});
-
   final String time;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return OutlinedButton(
-      onPressed: () {},
+      onPressed: onTap,
       style: OutlinedButton.styleFrom(
         foregroundColor: AppColors.navy,
         side: const BorderSide(color: AppColors.pink),
